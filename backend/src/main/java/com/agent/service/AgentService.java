@@ -1,5 +1,6 @@
 package com.agent.service;
 
+import com.agent.tool.GoogleCalendarTool;
 import com.agent.tool.ObsidianTool;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpEntity;
@@ -20,10 +21,14 @@ public class AgentService {
     private final RestTemplate restTemplate = new RestTemplate();
     private final String apiKey;
     private final ObsidianTool obsidianTool;
+    private final GoogleCalendarTool calendarTool;
 
-    public AgentService(@Value("${anthropic.api.key}") String apiKey, ObsidianTool obsidianTool) {
+    public AgentService(@Value("${anthropic.api.key}") String apiKey,
+                        ObsidianTool obsidianTool,
+                        GoogleCalendarTool calendarTool) {
         this.apiKey = apiKey;
         this.obsidianTool = obsidianTool;
+        this.calendarTool = calendarTool;
     }
 
     @SuppressWarnings("unchecked")
@@ -36,7 +41,10 @@ public class AgentService {
         List<Map<String, Object>> messages = new ArrayList<>();
         messages.add(Map.of("role", "user", "content", userMessage));
 
-        List<Map<String, Object>> tools = List.of(buildObsidianToolSchema());
+        List<Map<String, Object>> tools = List.of(
+                buildObsidianToolSchema(),
+                buildCalendarToolSchema()
+        );
 
         // Agentic loop: keep going until Claude stops calling tools
         while (true) {
@@ -69,9 +77,14 @@ public class AgentService {
                 for (Map<String, Object> block : content) {
                     if ("tool_use".equals(block.get("type"))) {
                         String toolUseId = (String) block.get("id");
+                        String toolName = (String) block.get("name");
                         Map<String, Object> input = (Map<String, Object>) block.get("input");
                         String operation = (String) input.get("operation");
-                        String result = obsidianTool.execute(operation, input);
+                        String result = switch (toolName) {
+                            case "obsidian" -> obsidianTool.execute(operation, input);
+                            case "google_calendar" -> calendarTool.execute(operation, input);
+                            default -> "Unknown tool: " + toolName;
+                        };
                         toolResults.add(Map.of(
                                 "type", "tool_result",
                                 "tool_use_id", toolUseId,
@@ -117,6 +130,26 @@ public class AgentService {
         return Map.of(
                 "name", "obsidian",
                 "description", "Read notes from the user's Obsidian vault (LifeOS). Use this to access their inbox, daily notes, weekly reviews, projects, areas, and knowledge base.",
+                "input_schema", inputSchema
+        );
+    }
+
+    private Map<String, Object> buildCalendarToolSchema() {
+        Map<String, Object> properties = new LinkedHashMap<>();
+        properties.put("operation", Map.of(
+                "type", "string",
+                "enum", List.of("get_today_events", "get_week_events", "get_month_events"),
+                "description", "Which calendar window to fetch: today, next 7 days, or next 30 days."
+        ));
+
+        Map<String, Object> inputSchema = new LinkedHashMap<>();
+        inputSchema.put("type", "object");
+        inputSchema.put("properties", properties);
+        inputSchema.put("required", List.of("operation"));
+
+        return Map.of(
+                "name", "google_calendar",
+                "description", "Fetch events from the user's primary Google Calendar. Returns events with title, date, time, duration, and attendees.",
                 "input_schema", inputSchema
         );
     }
