@@ -8,6 +8,7 @@ import com.google.api.client.http.GenericUrl;
 import com.google.api.client.http.javanet.NetHttpTransport;
 import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.calendar.Calendar;
+import com.google.api.services.calendar.model.CalendarListEntry;
 import com.google.api.services.calendar.model.Event;
 import com.google.api.services.calendar.model.EventAttendee;
 import com.google.api.services.calendar.model.EventDateTime;
@@ -20,6 +21,8 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
@@ -75,6 +78,15 @@ public class GoogleCalendarTool {
                 .build();
     }
 
+    private record TaggedEvent(String calendarLabel, Event event) {
+        long startMillis() {
+            EventDateTime start = event.getStart();
+            if (start.getDateTime() != null) return start.getDateTime().getValue();
+            if (start.getDate() != null) return start.getDate().getValue();
+            return Long.MAX_VALUE;
+        }
+    }
+
     private String getEvents(int startDayOffset, int days) throws Exception {
         Calendar service = buildCalendarClient();
 
@@ -82,27 +94,57 @@ public class GoogleCalendarTool {
         LocalDate today = LocalDate.now(zone);
         long startMs = today.plusDays(startDayOffset).atStartOfDay(zone).toInstant().toEpochMilli();
         long endMs = today.plusDays(startDayOffset + days).atStartOfDay(zone).toInstant().toEpochMilli();
+        com.google.api.client.util.DateTime timeMin = new com.google.api.client.util.DateTime(startMs);
+        com.google.api.client.util.DateTime timeMax = new com.google.api.client.util.DateTime(endMs);
 
-        Events events = service.events().list("primary")
-                .setTimeMin(new com.google.api.client.util.DateTime(startMs))
-                .setTimeMax(new com.google.api.client.util.DateTime(endMs))
-                .setSingleEvents(true)
-                .setOrderBy("startTime")
-                .setMaxResults(250)
-                .execute();
-
-        List<Event> items = events.getItems();
-        if (items == null || items.isEmpty()) {
-            return "No events found in the requested window.";
+        List<CalendarListEntry> calendars = service.calendarList().list().execute().getItems();
+        if (calendars == null || calendars.isEmpty()) {
+            return "No calendars accessible.";
         }
 
-        return items.stream().map(this::formatEvent).collect(Collectors.joining("\n\n"));
+        List<TaggedEvent> all = new ArrayList<>();
+        List<String> skipped = new ArrayList<>();
+
+        for (CalendarListEntry cal : calendars) {
+            String label = cal.getSummaryOverride() != null ? cal.getSummaryOverride() : cal.getSummary();
+            try {
+                Events events = service.events().list(cal.getId())
+                        .setTimeMin(timeMin)
+                        .setTimeMax(timeMax)
+                        .setSingleEvents(true)
+                        .setOrderBy("startTime")
+                        .setMaxResults(250)
+                        .execute();
+                List<Event> items = events.getItems();
+                if (items != null) {
+                    for (Event e : items) {
+                        all.add(new TaggedEvent(label, e));
+                    }
+                }
+            } catch (Exception e) {
+                skipped.add(label + " (" + e.getMessage() + ")");
+            }
+        }
+
+        if (all.isEmpty()) {
+            String suffix = skipped.isEmpty() ? "" : "\n\nSkipped calendars: " + String.join("; ", skipped);
+            return "No events found in the requested window across " + calendars.size() + " calendar(s)." + suffix;
+        }
+
+        all.sort(Comparator.comparingLong(TaggedEvent::startMillis));
+
+        String body = all.stream().map(this::formatEvent).collect(Collectors.joining("\n\n"));
+        if (!skipped.isEmpty()) {
+            body += "\n\nSkipped calendars: " + String.join("; ", skipped);
+        }
+        return body;
     }
 
-    private String formatEvent(Event event) {
+    private String formatEvent(TaggedEvent tagged) {
+        Event event = tagged.event();
         StringBuilder sb = new StringBuilder();
         String title = event.getSummary() == null ? "(no title)" : event.getSummary();
-        sb.append("Title: ").append(title).append("\n");
+        sb.append("📅 ").append(tagged.calendarLabel()).append(": ").append(title).append("\n");
 
         EventDateTime start = event.getStart();
         EventDateTime end = event.getEnd();

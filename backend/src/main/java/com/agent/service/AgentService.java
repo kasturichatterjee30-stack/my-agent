@@ -149,7 +149,7 @@ public class AgentService {
 
         return Map.of(
                 "name", "google_calendar",
-                "description", "Fetch events from the user's primary Google Calendar. Returns events with title, date, time, duration, and attendees.",
+                "description", "Fetches events from ALL Google calendars the user has access to, including shared and family calendars. Returns events labeled with their calendar name.",
                 "input_schema", inputSchema
         );
     }
